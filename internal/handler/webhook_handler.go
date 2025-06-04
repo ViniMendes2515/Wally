@@ -2,27 +2,33 @@ package handler
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"wally/internal/service"
 )
 
 type WebhookPayload struct {
-	Event string `json:"event"`
-	Data  struct {
-		Chats struct {
-			Messages []struct {
-				Message struct {
-					Key struct {
-						RemoteJid string `json:"remoteJid"`
-					} `json:"key"`
-					Pushname string `json:"pushName"`
-					Message  struct {
-						Conversation string `json:"conversation"`
-					} `json:"message"`
-				} `json:"message"`
-			} `json:"messages"`
-		} `json:"chats"`
+	Event     string `json:"event"`
+	SessionID string `json:"sessionId"`
+	Timestamp int64  `json:"timestamp"`
+	Data      struct {
+		Messages struct {
+			Key struct {
+				RemoteJid string `json:"remoteJid"`
+				FromMe    bool   `json:"fromMe"`
+				ID        string `json:"id"`
+			} `json:"key"`
+			MessageTimestamp int64  `json:"messageTimestamp"`
+			PushName         string `json:"pushName"`
+			Broadcast        bool   `json:"broadcast"`
+			Message          struct {
+				Conversation       string `json:"conversation"`
+				MessageContextInfo any    `json:"messageContextInfo"`
+			} `json:"message"`
+			RemoteJid string `json:"remoteJid"`
+			ID        string `json:"id"`
+		} `json:"messages"`
 	} `json:"data"`
 }
 
@@ -32,18 +38,26 @@ func WebhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload WebhookPayload
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Erro ao ler body", http.StatusInternalServerError)
+		return
+	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var payload WebhookPayload
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
 		http.Error(w, "Erro ao decodificar a mensagem", http.StatusBadRequest)
 		return
 	}
 
-	if len(payload.Data.Chats.Messages) > 0 {
-		msg := payload.Data.Chats.Messages[0]
-		name := msg.Message.Pushname
-		number := strings.Replace(msg.Message.Key.RemoteJid, "@s.whatsapp.net", "", 1)
+	msg := payload.Data.Messages
 
-		service.ProcessMessage(number, msg.Message.Message.Conversation, name)
+	if msg.Key.FromMe {
+		return
 	}
+	name := msg.PushName
+	number := strings.Replace(msg.Key.RemoteJid, "@s.whatsapp.net", "", 1)
+	text := msg.Message.Conversation
+
+	service.ProcessMessage(number, text, name)
 }

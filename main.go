@@ -4,10 +4,15 @@ import (
 	"log"
 	"net/http"
 	"wally/config"
+	"wally/internal/database"
 	"wally/internal/handler"
 )
 
 func main() {
+
+	if err := database.InitDB(); err != nil {
+		log.Fatalf("Erro ao inicializar o banco de dados: %v", err)
+	}
 	_, err := config.StartNgrok("8080")
 	if err != nil {
 		log.Fatalf("Erro ao iniciar o ngrok: %v", err)

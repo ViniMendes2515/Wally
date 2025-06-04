@@ -1,26 +1,49 @@
 package sessions
 
-import "sync"
-
-var (
-	stateMap = make(map[string]string)
-	mu       sync.RWMutex
+import (
+	"strings"
+	"sync"
 )
 
-func Set(user string, state string) {
+var (
+	userSessions = make(map[string]string)
+	mu           sync.RWMutex // Mutex para proteger o acesso concorrente ao mapa
+)
+
+// Set armazena um valor de sessão para uma chave (número de telefone).
+func Set(key, value string) {
 	mu.Lock()
 	defer mu.Unlock()
-	stateMap[user] = state
+	userSessions[key] = value
 }
 
-func Get(user string) string {
+// Get recupera um valor de sessão. Retorna o valor e um booleano indicando se foi encontrado.
+func Get(key string) (string, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
-	return stateMap[user]
+	value, ok := userSessions[key]
+	return value, ok
 }
 
-func Delete(user string) {
+// Delete remove uma sessão.
+func Delete(key string) {
 	mu.Lock()
 	defer mu.Unlock()
-	delete(stateMap, user)
+	delete(userSessions, key)
+}
+
+// GetAndClearIfPrefix recupera e remove uma sessão se ela começar com o prefixo especificado.
+// Retorna o valor completo da sessão (fullStateValue) e a parte da string após o prefixo (contentAfterPrefix).
+// Se não corresponder ao prefixo ou não existir, retorna strings vazias para ambos.
+func GetAndClearIfPrefix(key, prefix string) (fullStateValue string, contentAfterPrefix string) {
+	mu.Lock() // Precisa de Lock pois pode deletar
+	defer mu.Unlock()
+
+	val, ok := userSessions[key]
+	if ok && strings.HasPrefix(val, prefix) {
+		originalContent := strings.TrimPrefix(val, prefix)
+		delete(userSessions, key)
+		return val, originalContent
+	}
+	return "", ""
 }

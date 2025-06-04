@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -16,7 +17,7 @@ type GeminiRequestPart struct {
 
 type GeminiRequestContent struct {
 	Parts []GeminiRequestPart `json:"parts"`
-	Role  string              `json:"role,omitempty"` // "user" ou "model"
+	Role  string              `json:"role,omitempty"`
 }
 
 type GeminiRequest struct {
@@ -25,10 +26,9 @@ type GeminiRequest struct {
 }
 
 type GeminiGenerationConfig struct {
-	ResponseMIMEType string `json:"responseMimeType,omitempty"` // Para forçar JSON output
+	ResponseMIMEType string `json:"responseMimeType,omitempty"`
 }
 
-// Estruturas para a resposta da API Gemini
 type GeminiResponsePart struct {
 	Text string `json:"text"`
 }
@@ -42,77 +42,71 @@ type GeminiCandidate struct {
 	Content      GeminiResponseContent `json:"content"`
 	FinishReason string                `json:"finishReason"`
 	Index        int                   `json:"index"`
-	// SafetyRatings []SafetyRating `json:"safetyRatings"` // Pode ser adicionado se necessário
 }
 
 type GeminiAPIResponse struct {
 	Candidates     []GeminiCandidate `json:"candidates"`
-	PromptFeedback map[string]any    `json:"promptFeedback,omitempty"` // Para debug
+	PromptFeedback map[string]any    `json:"promptFeedback,omitempty"`
 }
 
-// IntentResponse é a estrutura que esperamos que a Gemini retorne (dentro do campo 'text' da resposta dela)
 type IntentResponse struct {
 	Action     string            `json:"action"`
 	Parameters map[string]string `json:"parameters"`
-	Error      string            `json:"error,omitempty"` // Se a Gemini detectar um erro ou não entender
+	Error      string            `json:"error,omitempty"`
 }
 
-// callGeminiAPI faz a chamada real para a API Gemini
-func callGeminiAPI(userMessage string, geminiKey string) (IntentResponse, error) {
+func callGeminiAPI(userMessage string, geminiKey string, learnedContext string) (IntentResponse, error) {
 	var intentResp IntentResponse
-	// Usar gemini-1.5-flash-latest que é bom para tarefas rápidas e suporta JSON output
-	// Se você tiver acesso ao gemini-2.0-flash, pode ajustar o nome do modelo.
 	apiURL := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + geminiKey
 
-	// Prompt para instruir a Gemini a retornar um JSON
-	// Este prompt é crucial para o sucesso da extração.
-	prompt := fmt.Sprintf(`
+	basePrompt := `
 Analise a seguinte mensagem do usuário para um bot de finanças pessoais.
 Extraia a intenção principal e quaisquer parâmetros relevantes.
 Responda APENAS com um objeto JSON no seguinte formato:
 {
   "action": "SUA_ACAO_DETECTADA",
   "parameters": {
-    "parametro1": "valor1",
-    "parametro2": "valor2"
+    "amount": "valor_da_despesa",
+    "category": "categoria_da_despesa",
+    "description": "descricao_detalhada_da_despesa"
   },
   "error": "mensagem_de_erro_se_houver"
 }
 
 Ações possíveis e seus parâmetros:
 - "add_expense": Adicionar uma nova despesa.
-  - Parâmetros esperados: "amount" (número como string, ex: "100.50"), "category" (texto, ex: "lazer").
+  - Parâmetros esperados: "amount" (número como string, ex: "100.50"), "category" (texto, ex: "lazer"), "description" (texto opcional, ex: "Assinatura do GPT").
 - "show_menu": Se o usuário pedir o menu, ajuda, ou saudações iniciais (oi, olá, etc.).
   - Sem parâmetros.
 - "unknown_intent": Se a intenção não for clara, não corresponder a nenhuma ação conhecida, ou se faltarem informações cruciais.
   - Parâmetro opcional "error" com uma breve descrição do problema.
 
 Exemplos de mensagens e respostas JSON esperadas:
-1. Usuário: "adicionar despesa de 100 reais na categoria lazer"
-   JSON: {"action": "add_expense", "parameters": {"amount": "100", "category": "lazer"}}
+1. Usuário: "adicionar despesa de 100 reais com assinatura do GPT"
+   JSON: {"action": "add_expense", "parameters": {"amount": "100", "category": "Assinatura", "description": "Assinatura do GPT"}}
 2. Usuário: "gastei 25.50 com café"
-   JSON: {"action": "add_expense", "parameters": {"amount": "25.50", "category": "café"}}
+   JSON: {"action": "add_expense", "parameters": {"amount": "25.50", "category": "café", "description": "café"}}
 3. Usuário: "menu"
    JSON: {"action": "show_menu", "parameters": {}}
-4. Usuário: "quero ver meu saldo" (não implementado ainda, então unknown)
+4. Usuário: "quero ver meu saldo"
    JSON: {"action": "unknown_intent", "parameters": {}, "error": "Funcionalidade 'ver saldo' ainda não suportada."}
-5. Usuário: "adicionar despesa de comida" (falta valor)
-   JSON: {"action": "unknown_intent", "parameters": {"category": "comida"}, "error": "Valor da despesa não especificado."}
+`
+	finalPrompt := basePrompt
+	if learnedContext != "" {
+		finalPrompt = fmt.Sprintf("Contexto aprendido de interações anteriores (use isso para ajudar a entender a mensagem atual):\n%s\n\n%s", learnedContext, basePrompt)
+		log.Printf("GEMINI: Usando contexto aprendido: %s", learnedContext)
+	}
 
-
-Mensagem do usuário: "%s"
-`, userMessage)
+	finalPrompt += fmt.Sprintf("\nMensagem do usuário: \"%s\"", userMessage)
 
 	requestPayload := GeminiRequest{
 		Contents: []GeminiRequestContent{
 			{
 				Parts: []GeminiRequestPart{
-					{Text: prompt},
+					{Text: finalPrompt},
 				},
 			},
 		},
-		// Para modelos que suportam, forçar a saída JSON é mais robusto.
-		// Gemini 1.5 Flash suporta isso.
 		GenerationConfig: &GeminiGenerationConfig{
 			ResponseMIMEType: "application/json",
 		},
@@ -137,10 +131,13 @@ Mensagem do usuário: "%s"
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Erro da API Gemini - Status: %s, Body: %s", resp.Status, string(bodyBytes))
 		var errorBody map[string]any
-		json.NewDecoder(resp.Body).Decode(&errorBody)
-		log.Printf("Erro da API Gemini - Status: %s, Body: %v", resp.Status, errorBody)
-		return intentResp, fmt.Errorf("API Gemini retornou status não OK: %s. Detalhes: %v", resp.Status, errorBody)
+		if json.Unmarshal(bodyBytes, &errorBody) == nil {
+			return intentResp, fmt.Errorf("API Gemini retornou status não OK: %s. Detalhes: %v", resp.Status, errorBody)
+		}
+		return intentResp, fmt.Errorf("API Gemini retornou status não OK: %s. Detalhes: %s", resp.Status, string(bodyBytes))
 	}
 
 	var geminiAPIResp GeminiAPIResponse
@@ -151,21 +148,33 @@ Mensagem do usuário: "%s"
 	if len(geminiAPIResp.Candidates) == 0 || len(geminiAPIResp.Candidates[0].Content.Parts) == 0 {
 		log.Println("Resposta da Gemini não contém candidatos ou partes válidas.")
 		log.Printf("Resposta completa da Gemini: %+v", geminiAPIResp)
+		intentResp.Action = "unknown_intent"
+		intentResp.Error = "Resposta da IA está vazia ou malformada."
 		return intentResp, fmt.Errorf("resposta da Gemini malformada ou vazia")
 	}
 
-	// O texto da Gemini que esperamos ser um JSON
 	responseText := geminiAPIResp.Candidates[0].Content.Parts[0].Text
 	log.Printf("Texto recebido da Gemini (esperado JSON): %s", responseText)
 
-	// Tentar decodificar o texto da Gemini para nossa estrutura IntentResponse
 	if err := json.Unmarshal([]byte(responseText), &intentResp); err != nil {
 		log.Printf("Erro ao fazer unmarshal do JSON da Gemini para IntentResponse: %v. Texto recebido: %s", err, responseText)
-		// Fallback se o JSON não for o esperado, mas ainda tentar uma análise básica
 		intentResp.Action = "unknown_intent"
 		intentResp.Error = "Não consegui processar a resposta da IA. Tente ser mais específico ou peça o menu."
-		return intentResp, nil // Retorna um erro "suave" para o chamador lidar
+		return intentResp, nil
 	}
 
 	return intentResp, nil
+}
+
+func fallbackConversationalResponse(userMessage, geminiKey string) string {
+	prompt := fmt.Sprintf(`Você é um assistente financeiro simpático. O usuário perguntou: "%s"
+Se não for possível executar a ação, responda de forma educada, explique o que você pode fazer e sugira exemplos de comandos válidos.`, userMessage)
+	resp, err := callGeminiAPI(prompt, geminiKey, "")
+	if err != nil || resp.Action == "" {
+		return "Desculpe, não consegui entender sua solicitação. Você pode tentar algo como: 'Adicionar despesa de 20 em comida' ou pedir o 'menu'."
+	}
+	if resp.Error != "" {
+		return resp.Error
+	}
+	return "Desculpe, não consegui entender sua solicitação. Você pode tentar algo como: 'Adicionar despesa de 20 em comida' ou pedir o 'menu'."
 }
